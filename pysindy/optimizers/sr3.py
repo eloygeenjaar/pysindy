@@ -151,7 +151,7 @@ class SR3(BaseOptimizer):
         initial_guess=None,
         normalize_columns=False,
         verbose=False,
-        sparse=True
+        sparsity=True
     ):
         super(SR3, self).__init__(
             max_iter=max_iter,
@@ -160,7 +160,7 @@ class SR3(BaseOptimizer):
             copy_X=copy_X,
             normalize_columns=normalize_columns,
         )
-
+        self.sparsity = sparsity
         if threshold < 0:
             raise ValueError("threshold cannot be negative")
         if nu <= 0:
@@ -311,10 +311,14 @@ class SR3(BaseOptimizer):
             last_coef = self.history_[-2]
         else:
             last_coef = np.zeros_like(this_coef)
-        last_coef = sparse.csr_matrix(last_coef)
 
-        #err_coef = np.sqrt(np.sum((this_coef - last_coef) ** 2)) / self.nu
-        err_coef = np.sqrt((this_coef - last_coef).power(2).sum()) / self.nu
+        if self.sparsity:
+            last_coef = sparse.csr_matrix(last_coef)
+            # np.sqrt() can stay because it's a float
+            err_coef = np.sqrt((this_coef - last_coef).power(2).sum()) / self.nu
+        else:
+            err_coef = np.sqrt(np.sum((this_coef - last_coef) ** 2)) / self.nu
+       
         if self.use_trimming:
             this_trimming_array = self.history_trimming_[-1]
             if len(self.history_trimming_) > 1:
