@@ -2,6 +2,7 @@ import warnings
 
 import cvxpy as cp
 import numpy as np
+from scipy import sparse
 from scipy.linalg import cho_factor
 from sklearn.exceptions import ConvergenceWarning
 
@@ -159,6 +160,7 @@ class ConstrainedSR3(SR3):
         inequality_constraints=False,
         verbose=False,
         verbose_cvxpy=False,
+        sparsity=False
     ):
         super(ConstrainedSR3, self).__init__(
             threshold=threshold,
@@ -176,8 +178,9 @@ class ConstrainedSR3(SR3):
             verbose=verbose,
         )
 
+        self.sparsity = sparsity
         self.verbose_cvxpy = verbose_cvxpy
-        self.reg = get_regularization(thresholder)
+        self.reg = get_regularization(thresholder, sparsity=self.sparsity)
         self.use_constraints = (constraint_lhs is not None) and (
             constraint_rhs is not None
         )
@@ -187,9 +190,12 @@ class ConstrainedSR3(SR3):
                 raise ValueError(
                     "constraint_order must be either 'feature' or 'target'"
                 )
-
-            self.constraint_lhs = constraint_lhs
-            self.constraint_rhs = constraint_rhs
+            if self.sparsity:
+                self.constraint_lhs = sparse.csc_matrix(constraint_lhs)
+                self.constraint_rhs = sparse.csc_matrix(constraint_rhs)
+            else:
+                self.constraint_lhs = constraint_lhs
+                self.constraint_rhs = constraint_rhs
             self.unbias = False
             self.constraint_order = constraint_order
 
@@ -215,15 +221,25 @@ class ConstrainedSR3(SR3):
 
     def _update_full_coef_constraints(self, H, x_transpose_y, coef_sparse):
         g = x_transpose_y + coef_sparse / self.nu
-        inv1 = np.linalg.inv(H)
-        inv1_mod = np.kron(inv1, np.eye(coef_sparse.shape[1]))
-        inv2 = np.linalg.inv(
-            self.constraint_lhs.dot(inv1_mod).dot(self.constraint_lhs.T)
-        )
-
-        rhs = g.flatten() + self.constraint_lhs.T.dot(inv2).dot(
-            self.constraint_rhs - self.constraint_lhs.dot(inv1_mod).dot(g.flatten())
-        )
+        if isinstance(H, sparse.csr_matrix) or isinstance(H, sparse.csc_matrix):
+            inv1 = sparse.linalg.inv(H)
+            inv1_mod = sparse.kron(inv1, sparse.eye(coef_sparse.shape[1]))
+            inv2 = sparse.linalg.inv(
+                self.constraint_lhs.dot(inv1_mod).dot(self.constraint_lhs.T)
+            )
+            rhs = g.reshape((-1, 1)) + self.constraint_lhs.T.dot(inv2).dot(
+                (self.constraint_rhs - self.constraint_lhs.dot(
+                    inv1_mod).dot(g.reshape(- 1, 1)).T).T
+            )
+        else:
+            inv1 = np.linalg.inv(H)
+            inv1_mod = np.kron(inv1, np.eye(coef_sparse.shape[1]))
+            inv2 = np.linalg.inv(
+                self.constraint_lhs.dot(inv1_mod).dot(self.constraint_lhs.T)
+            )
+            rhs = g.flatten() + self.constraint_lhs.T.dot(inv2).dot(
+                (self.constraint_rhs - self.constraint_lhs.dot(inv1_mod).dot(g.flatten()))
+            )
         rhs = rhs.reshape(g.shape)
         return inv1.dot(rhs)
 
@@ -268,10 +284,12 @@ class ConstrainedSR3(SR3):
                 prob.solve(abstol=self.tol, reltol=self.tol, verbose=self.verbose_cvxpy)
             except cp.error.SolverError:
                 print("Solver failed, setting coefs to zeros")
-                xi.value = np.zeros(coef_sparse.shape[0] * coef_sparse.shape[1])
+                xi.value = np.zeros(coef_sparse.shape[0] * coef_sparse.shape[1],
+                                    dtype=np.float32)
         except cp.error.SolverError:
             print("Solver failed, setting coefs to zeros")
-            xi.value = np.zeros(coef_sparse.shape[0] * coef_sparse.shape[1])
+            xi.value = np.zeros(coef_sparse.shape[0] * coef_sparse.shape[1],
+                                dtype=np.float32)
 
         if xi.value is None:
             warnings.warn(
@@ -298,8 +316,12 @@ class ConstrainedSR3(SR3):
             print_ind = q % (self.max_iter // 10.0)
         else:
             print_ind = q
-        R2 = (y - np.dot(x, coef_full)) ** 2
-        D2 = (coef_full - coef_sparse) ** 2
+        if self.sparsity:
+            R2 = (y - x.dot(coef_full)).power(2)
+            D2 = (coef_full - coef_sparse).power(2)
+        else:
+            R2 = (y - np.dot(x, coef_full)) ** 2
+            D2 = (coef_full - coef_sparse) ** 2
         if self.use_trimming:
             assert trimming_array is not None
             R2 *= trimming_array.reshape(x.shape[0], 1)
@@ -345,7 +367,12 @@ class ConstrainedSR3(SR3):
         if self.initial_guess is not None:
             self.coef_ = self.initial_guess
 
-        coef_sparse = self.coef_.T
+        if self.sparsity:
+            x = sparse.csr_matrix(x)
+            y = sparse.csr_matrix(y)
+            coef_sparse = sparse.csr_matrix(self.coef_.T)
+        else:
+            coef_sparse = self.coef_.T
         coef_full = coef_sparse.copy()
         n_samples, n_features = x.shape
         n_targets = y.shape[1]
@@ -359,13 +386,21 @@ class ConstrainedSR3(SR3):
 
         # Precompute some objects for upcoming least-squares solves.
         # Assumes that self.nu is fixed throughout optimization procedure.
-        H = np.dot(x.T, x) + np.diag(np.full(x.shape[1], 1.0 / self.nu))
-        x_transpose_y = np.dot(x.T, y)
+        if self.sparsity:
+            H = x.T.dot(x) + sparse.eye(x.shape[1]) * (1.0 / self.nu)
+            x_transpose_y = x.T.dot(y)
+        else:
+            H = np.dot(x.T, x) + np.diag(np.full(x.shape[1], 1.0 / self.nu))
+            x_transpose_y = np.dot(x.T, y)
         if not self.use_constraints:
-            cho = cho_factor(H)
+            if self.sparsity:
+                cho = sparse.csr_matrix(cho_factor(H.toarray()))
+            else:
+                cho = cho_factor(H)
         if self.inequality_constraints:
             # Precompute some objects for optimization
-            x_expanded = np.zeros((n_samples, n_targets, n_features, n_targets))
+            x_expanded = np.zeros((n_samples, n_targets, n_features, n_targets),
+                                  dtype=np.float32)
             for i in range(n_targets):
                 x_expanded[:, i, :, i] = x
             x_expanded = np.reshape(
@@ -407,8 +442,10 @@ class ConstrainedSR3(SR3):
                 else:
                     coef_full = self._update_full_coef(cho, x_transpose_y, coef_sparse)
                 coef_sparse = self._update_sparse_coef(coef_full)
-                self.history_.append(np.copy(coef_sparse).T)
-
+                if self.sparsity:
+                    self.history_.append(coef_sparse.copy().T)
+                else:
+                    self.history_.append(np.copy(coef_sparse).T)
                 if self.use_trimming:
                     trimming_array = self._update_trimming_array(
                         coef_full, trimming_array, trimming_grad

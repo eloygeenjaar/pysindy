@@ -3,6 +3,7 @@ from typing import Sequence
 
 import numpy as np
 from numpy.random import choice
+from scipy import sparse
 from scipy.integrate import trapezoid
 from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import bisect
@@ -210,7 +211,10 @@ def drop_random_rows(
 
 def reorder_constraints(c, n_features, output_order="row"):
     """Reorder constraint matrix."""
-    ret = c.copy()
+    if isinstance(c, sparse.csr_matrix) or isinstance(c, sparse.csc_matrix):
+        ret = c.todense()
+    else:
+        ret = c.copy()
 
     if ret.ndim == 1:
         ret = ret.reshape(1, -1)
@@ -224,13 +228,18 @@ def reorder_constraints(c, n_features, output_order="row"):
     else:
         for i in range(ret.shape[0]):
             ret[i] = ret[i].reshape(shape, order="F").flatten()
-
+    if isinstance(c, sparse.csr_matrix) or isinstance(c, sparse.csc_matrix):
+        ret = sparse.csc_matrix(ret)
     return ret
 
 
 def prox_l0(x, threshold):
     """Proximal operator for L0 regularization."""
-    return x * (np.abs(x) > threshold)
+    if isinstance(x, sparse.csr_matrix) or isinstance(x, sparse.csc_matrix):
+        x = x.toarray()
+        return sparse.csr_matrix(x * (np.abs(x) > threshold))
+    else:
+        return x * (np.abs(x) > threshold)
 
 
 def prox_weighted_l0(x, thresholds):
@@ -245,7 +254,10 @@ def prox_weighted_l0(x, thresholds):
 
 def prox_l1(x, threshold):
     """Proximal operator for L1 regularization."""
-    return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
+    if isinstance(x, sparse.csr_matrix):
+        return x.sign() * (abs(x) - threshold).max(axis=0)
+    else:
+        return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
 
 
 def prox_weighted_l1(x, thresholds):
@@ -303,19 +315,37 @@ def get_prox(regularization):
         raise NotImplementedError("{} has not been implemented".format(regularization))
 
 
-def get_regularization(regularization):
+def get_regularization(regularization, sparsity=True):
     if regularization.lower() == "l0":
-        return lambda x, lam: lam * np.count_nonzero(x)
+        if sparsity:
+            return lambda x, lam: lam * len(sparse.find(x)[1])
+        else:
+            return lambda x, lam: lam * np.count_nonzero(x)
     elif regularization.lower() == "weighted_l0":
-        return lambda x, lam: np.sum(lam[np.nonzero(x)])
+        if sparsity:
+            return lambda x, lam: lam[sparse.find(x)[0]].sum()
+        else:
+            return lambda x, lam: np.sum(lam[np.nonzero(x)])
     elif regularization.lower() == "l1":
-        return lambda x, lam: lam * np.sum(np.abs(x))
+        if sparsity:
+            return lambda x, lam: lam * abs(x).sum()
+        else:
+            return lambda x, lam: lam * np.sum(np.abs(x))
     elif regularization.lower() == "weighted_l1":
-        return lambda x, lam: np.sum(np.abs(lam @ x))
+        if sparsity:
+            return lambda x, lam: abs(lam @ x).sum()
+        else:
+            return lambda x, lam: np.sum(np.abs(lam @ x))
     elif regularization.lower() == "l2":
-        return lambda x, lam: lam * np.sum(x ** 2)
+        if sparsity:
+            return lambda x, lam: lam * x.power(2).sum()
+        else:
+            return lambda x, lam: lam * np.sum(x ** 2)
     elif regularization.lower() == "weighted_l2":
-        return lambda x, lam: np.sum(lam @ x ** 2)
+        if sparsity:
+            return lambda x, lam: (lam @ x).power(2).sum()
+        else:
+            return lambda x, lam: np.sum(lam @ x ** 2)
     elif regularization.lower() == "cad":  # dummy function
         return lambda x, lam: 0
     else:

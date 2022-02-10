@@ -1,6 +1,7 @@
 import warnings
 
 import numpy as np
+from scipy import sparse
 from scipy.linalg import cho_factor
 from scipy.linalg import cho_solve
 from sklearn.exceptions import ConvergenceWarning
@@ -150,6 +151,7 @@ class SR3(BaseOptimizer):
         initial_guess=None,
         normalize_columns=False,
         verbose=False,
+        sparse=True
     ):
         super(SR3, self).__init__(
             max_iter=max_iter,
@@ -309,7 +311,10 @@ class SR3(BaseOptimizer):
             last_coef = self.history_[-2]
         else:
             last_coef = np.zeros_like(this_coef)
-        err_coef = np.sqrt(np.sum((this_coef - last_coef) ** 2)) / self.nu
+        last_coef = sparse.csr_matrix(last_coef)
+
+        #err_coef = np.sqrt(np.sum((this_coef - last_coef) ** 2)) / self.nu
+        err_coef = np.sqrt((this_coef - last_coef).power(2).sum()) / self.nu
         if self.use_trimming:
             this_trimming_array = self.history_trimming_[-1]
             if len(self.history_trimming_) > 1:
